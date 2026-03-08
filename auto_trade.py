@@ -1,6 +1,7 @@
 """
 auto_trade.py — Polymarket Weather Arb Auto Trader
-Reads scan_results.json, picks top March 8+ edges, places BUY orders.
+Reads scan_results.json, picks top edges, places BUY orders.
+Sizing: Half-Kelly criterion — bet proportional to edge, capped at MAX_BET.
 """
 
 import os, json, sys
@@ -10,10 +11,36 @@ from datetime import date, timedelta
 
 BASE = Path(__file__).parent
 
-TRADE_DOLLARS = 3.0   # $ per trade
-MAX_TRADES    = 2     # max positions to open
+# ── Kelly sizing config ────────────────────────────────────────────────────
+BANKROLL      = 20.0  # $ — your trading bankroll (update as balance changes)
+KELLY_FRAC    = 0.5   # Half-Kelly (safer than full Kelly, less variance)
+MIN_BET       = 1.0   # $ minimum per trade
+MAX_BET       = 8.0   # $ maximum per trade (cap Kelly to avoid overbet)
+MAX_TRADES    = 3     # max positions to open per run
 MIN_EDGE      = 0.20  # only trade if edge > 20%
-MIN_DATE      = (date.today() + timedelta(days=1)).isoformat()  # tomorrow+ (skip only today's markets)
+MIN_DATE      = (date.today() + timedelta(days=1)).isoformat()
+
+def kelly_size(edge_pct, price, bankroll=BANKROLL, frac=KELLY_FRAC):
+    """
+    Half-Kelly bet sizing.
+    Kelly fraction = edge / (1 - price) for binary YES bets
+    where edge = model_prob - market_price and price = market price paid.
+
+    For a bet at price p with model prob q:
+      Kelly % = (q - p) / (1 - p)   [for YES side]
+    This gives fraction of bankroll to risk.
+    """
+    if price <= 0 or price >= 1:
+        return MIN_BET
+    # Net edge as fraction of potential profit
+    b = (1.0 - price) / price   # odds: profit per $1 risked
+    p = price + edge_pct        # model probability
+    q = 1 - p                   # model probability of loss
+    kelly_pct = (b * p - q) / b
+    if kelly_pct <= 0:
+        return MIN_BET
+    bet = bankroll * frac * kelly_pct
+    return round(max(MIN_BET, min(MAX_BET, bet)), 2)
 
 
 def load_env():
@@ -62,11 +89,12 @@ def main():
     ]
     opps.sort(key=lambda x: abs(x["edge_pct"]), reverse=True)
 
-    print("[AutoTrader] Polymarket Weather Arb")
+    print("[AutoTrader] Polymarket Weather Arb — Half-Kelly Sizing")
     print(f"  Scan date : {results.get('date')}")
     print(f"  Min date  : {MIN_DATE}  (skipping today's resolved markets)")
     print(f"  Eligible  : {len(opps)} opportunities with >{MIN_EDGE:.0%} edge")
-    print(f"  Trading   : top {MAX_TRADES} at ${TRADE_DOLLARS:.0f} each")
+    print(f"  Bankroll  : ${BANKROLL:.2f}  |  Kelly: {KELLY_FRAC}x  |  Range: ${MIN_BET}-${MAX_BET}/trade")
+    print(f"  Trading   : top {MAX_TRADES}")
     print()
 
     if not opps:
@@ -118,14 +146,15 @@ def main():
         else:
             price = round(max(1.0 - yes_price, 0.01), 4)
 
-        # Number of shares we can buy with TRADE_DOLLARS
-        raw_size = TRADE_DOLLARS / price
+        # Kelly sizing — bet proportional to edge, capped between MIN_BET and MAX_BET
+        trade_dollars = kelly_size(abs(edge), price)
+        raw_size = trade_dollars / price
         size = max(1.0, round(raw_size, 1))
         cost = price * size
 
         print(f"[{i}/{MAX_TRADES}] BUY {signal}  |  edge {edge:+.1%}  |  date {mdate}")
         print(f"  Q   : {question[:70]}")
-        print(f"  Price: ${price:.4f}  |  Shares: {size}  |  Cost: ~${cost:.2f}")
+        print(f"  Kelly bet: ${trade_dollars:.2f}  |  Price: ${price:.4f}  |  Shares: {size}  |  Cost: ~${cost:.2f}")
         print(f"  Token: {token_id[:50]}...")
 
         try:
