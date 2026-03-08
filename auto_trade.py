@@ -20,6 +20,12 @@ MAX_TRADES    = 3     # max positions to open per run
 MIN_EDGE      = 0.20  # only trade if edge > 20%
 MIN_DATE      = (date.today() + timedelta(days=1)).isoformat()
 
+# ── Liquidity + concentration config ──────────────────────────────────────
+MIN_ASK_DEPTH     = 3.0    # $ of asks available at/near price (skip thin books)
+MAX_CITY_EXPOSURE = 10.0   # $ max already deployed in any single city
+MAX_DATE_EXPOSURE = 8.0    # $ max in any single date
+MAX_PORTFOLIO_PCT = 0.35   # max % of bankroll in a single position
+
 def kelly_size(edge_pct, price, bankroll=BANKROLL, frac=KELLY_FRAC):
     """
     Half-Kelly bet sizing.
@@ -54,6 +60,59 @@ def load_env():
                 env[k.strip()] = v.strip().strip('"').strip("'")
     return env
 
+
+def check_liquidity(token_id, price, min_depth=MIN_ASK_DEPTH):
+    """Check if there's enough ask-side liquidity to fill our order."""
+    try:
+        import httpx
+        r = httpx.get(f"https://clob.polymarket.com/order-book/{token_id}", timeout=6)
+        if not r.is_success:
+            return True  # can't check, allow through
+        ob = r.json()
+        asks = ob.get("asks", [])
+        # Sum available $ within 20% of our price
+        max_price = price * 1.2
+        depth = sum(float(a["price"]) * float(a["size"]) for a in asks
+                    if float(a["price"]) <= max_price)
+        return depth >= min_depth
+    except:
+        return True  # fail open
+
+def get_existing_exposure(creds, private_key):
+    """
+    Get current open orders grouped by city and date.
+    Returns: {city: $amount}, {date: $amount}
+    """
+    city_exposure = {}
+    date_exposure = {}
+    try:
+        import httpx, py_clob_client.http_helpers.helpers as h
+        h._http_client = httpx.Client(http2=True, timeout=20, verify=False)
+        from py_clob_client.client import ClobClient
+        from py_clob_client.clob_types import ApiCreds, OpenOrderParams
+        api_creds = ApiCreds(api_key=creds["apiKey"], api_secret=creds["secret"], api_passphrase=creds["passphrase"])
+        client = ClobClient("https://clob.polymarket.com", key=private_key, chain_id=137, creds=api_creds, signature_type=0)
+        orders = client.get_orders(OpenOrderParams()) or []
+        for o in orders:
+            price = float(o.get("price", 0))
+            size  = float(o.get("original_size", 0))
+            cost  = price * size
+            q     = o.get("question", "") or ""
+            # Extract city from question
+            for city in ["Buenos Aires","Wellington","Seattle","NYC","New York","Miami",
+                          "Chicago","Dallas","Atlanta","Toronto","London","Seoul","Paris"]:
+                if city.lower() in q.lower():
+                    city_exposure[city] = city_exposure.get(city, 0) + cost
+                    break
+            # Extract date
+            import re
+            dm = re.search(r'(March|April|May) (\d+)', q)
+            if dm:
+                dt = f"{dm.group(1)} {dm.group(2)}"
+                date_exposure[dt] = date_exposure.get(dt, 0) + cost
+    except Exception as e:
+        print(f"  Exposure check error: {e}")
+    return city_exposure, date_exposure
 
 def main():
     env = load_env()
@@ -101,6 +160,12 @@ def main():
         print("No eligible opportunities found. Re-run scanner.")
         sys.exit(0)
 
+    # Load existing exposure for concentration limits
+    city_exposure, date_exposure = get_existing_exposure(creds, private_key)
+    if city_exposure or date_exposure:
+        print(f"  City exposure  : {dict((k, f'${v:.2f}') for k,v in city_exposure.items())}")
+        print(f"  Date exposure  : {dict((k, f'${v:.2f}') for k,v in date_exposure.items())}")
+
     top = opps[:MAX_TRADES]
 
     # --- Patch httpx BEFORE importing ClobClient ---
@@ -146,7 +211,27 @@ def main():
         else:
             price = round(max(1.0 - yes_price, 0.01), 4)
 
-        # Kelly sizing — bet proportional to edge, capped between MIN_BET and MAX_BET
+        # ── Liquidity check ──────────────────────────────────────
+        if not check_liquidity(token_id, price):
+            print(f"  -> SKIP: insufficient order book depth (< ${MIN_ASK_DEPTH})")
+            continue
+
+        # ── Concentration limits ──────────────────────────────────
+        import re
+        city_match = next((c for c in ["Buenos Aires","Wellington","Seattle","New York","NYC",
+                           "Miami","Chicago","Dallas","Atlanta","Toronto","London","Seoul","Paris"]
+                           if c.lower() in question.lower()), None)
+        date_match_m = re.search(r'(March|April|May) (\d+)', question)
+        date_key = f"{date_match_m.group(1)} {date_match_m.group(2)}" if date_match_m else None
+
+        if city_match and city_exposure.get(city_match, 0) >= MAX_CITY_EXPOSURE:
+            print(f"  -> SKIP: already ${city_exposure[city_match]:.2f} deployed in {city_match} (limit ${MAX_CITY_EXPOSURE})")
+            continue
+        if date_key and date_exposure.get(date_key, 0) >= MAX_DATE_EXPOSURE:
+            print(f"  -> SKIP: already ${date_exposure[date_key]:.2f} deployed on {date_key} (limit ${MAX_DATE_EXPOSURE})")
+            continue
+
+        # ── Kelly sizing — bet proportional to edge, capped between MIN_BET and MAX_BET
         trade_dollars = kelly_size(abs(edge), price)
         raw_size = trade_dollars / price
         size = max(1.0, round(raw_size, 1))
