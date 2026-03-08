@@ -163,10 +163,12 @@ def main():
         elif cur_price <= 0.03 and size > 5:
             note = f"at ${cur_price:.3f}"
 
-        positions_data.append({
-            "label": label, "pnl": pnl, "cur_price": cur_price,
-            "avg_price": avg_price, "size": size, "note": note,
-        })
+        # Only show live positions — skip resolved (>=97c) and dust (<0.5c)
+        if cur_price < 0.97 and cur_price > 0.01 and size >= 1.0:
+            positions_data.append({
+                "label": label, "pnl": pnl, "cur_price": cur_price,
+                "avg_price": avg_price, "size": size, "note": note,
+            })
 
         # ── Instant alerts ──────────────────────────────────────
         if cur_price >= 0.99 and positions_state.get(token_id, {}).get("status") != "won":
