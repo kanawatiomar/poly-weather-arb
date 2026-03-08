@@ -140,9 +140,41 @@ def calibration_report(trades):
 
     return "\n".join(lines), total_pnl
 
+def resolve_paper_trades():
+    """Check and update paper trade outcomes."""
+    paper_db = BASE / "paper_trades.jsonl"
+    if not paper_db.exists():
+        return 0
+    trades = []
+    for line in paper_db.read_text().splitlines():
+        if line.strip():
+            try: trades.append(json.loads(line))
+            except: pass
+
+    updated = 0
+    for t in trades:
+        if t.get("resolved"): continue
+        cur = get_price(t.get("token_id",""))
+        if cur is None: continue
+        if cur >= RESOLVE_THRESHOLD:
+            t["resolved"] = True; t["outcome"] = "WIN"
+            t["final_price"] = cur; t["pnl"] = (cur - t["entry_price"]) * t.get("paper_size",1); updated += 1
+        elif cur <= LOSS_THRESHOLD:
+            t["resolved"] = True; t["outcome"] = "LOSS"
+            t["final_price"] = cur; t["pnl"] = (cur - t["entry_price"]) * t.get("paper_size",1); updated += 1
+
+    with open(paper_db, "w") as f:
+        for t in trades: f.write(json.dumps(t) + "\n")
+    return updated
+
 def main():
     env   = load_env()
     token = env.get("DISCORD_BOT_TOKEN","")
+
+    # Resolve paper trades silently
+    paper_resolved = resolve_paper_trades()
+    if paper_resolved:
+        print(f"  Resolved {paper_resolved} paper trade(s)")
 
     trades = load_trades()
     if not trades:
