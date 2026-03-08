@@ -36,13 +36,19 @@ def post_paper_discord(msg):
         httpx.post(url, json={"content": msg[:1990]}, timeout=8)
     except: pass
 
-MIN_EDGE      = 0.10   # lower than real (0.20) to get more data
-MAX_TRADES    = 20     # paper trade more markets per scan
-PAPER_BANKROLL = 1000  # hypothetical bankroll for sizing
-KELLY_FRAC    = 0.5
-MIN_BET       = 1.0
-MAX_BET       = 50.0   # higher cap — sizing is hypothetical
-MIN_DATE      = (date.today()).isoformat()  # include today for paper
+MIN_EDGE       = 0.10   # lower than real (0.20) to get more data
+MAX_TRADES     = 20     # paper trade more markets per scan
+PAPER_BANKROLL = 1000   # hypothetical bankroll for sizing
+KELLY_FRAC     = 0.5
+MIN_BET        = 1.0
+MAX_BET        = 50.0   # higher cap — sizing is hypothetical
+MIN_DATE       = (date.today()).isoformat()  # include today for paper
+
+# --- Quality filters ---
+MIN_ENTRY_PRICE = 0.05  # Skip signals where our token costs < 5¢ (market near-certain)
+                        # e.g. buying NO at $0.01 means market says YES is 99% — fade that
+SKIP_EXACT_DEGREE = True  # Skip single exact-degree markets ("will temp be exactly X°C")
+                           # These have <10% hit rate even when model mean is close
 
 def load_env():
     env = {}
@@ -96,7 +102,7 @@ def load_existing_paper_trades():
 def main():
     results_file = BASE / "scan_results.json"
     if not results_file.exists():
-        print("No scan_results.json — run scanner.py first")
+        print("No scan_results.json - run scanner.py first")
         sys.exit(0)
 
     with open(results_file) as f:
@@ -132,11 +138,22 @@ def main():
             price = round(yes_price, 4) if signal == "YES" else round(1.0 - yes_price, 4)
             price = max(0.01, min(0.99, price))
 
-            cur_price = get_current_price(token_id)
-
             f_mean = opp.get("forecast_mean")
             f_low  = opp.get("range_low")
             f_high = opp.get("range_high")
+
+            # Filter: skip near-zero entry prices (market already near-certain, bad signal)
+            if price < MIN_ENTRY_PRICE:
+                print(f"  [SKIP-LOWPRICE] {question[:55]} | price {price:.3f} < {MIN_ENTRY_PRICE}")
+                continue
+
+            # Filter: skip exact single-degree markets ("will temp be exactly X°C/°F")
+            if SKIP_EXACT_DEGREE and f_low is not None and f_high is not None:
+                if (f_high - f_low) == 1:  # exactly 1-degree window = exact match market
+                    print(f"  [SKIP-EXACT] {question[:55]} | single-degree market, low hit rate")
+                    continue
+
+            cur_price = get_current_price(token_id)
             bet    = kelly_size(abs(edge), price, f_mean, f_low, f_high)
             size   = round(bet / price, 1)
 
@@ -179,7 +196,7 @@ def main():
 
     # Post new trades to #paper-trading
     if new_trades > 0:
-        lines = [f"**📝 Paper Trades Logged — {datetime.now().strftime('%I:%M %p').lstrip('0')} | {new_trades} new**\n"]
+        lines = [f"**📝 Paper Trades Logged - {datetime.now().strftime('%I:%M %p').lstrip('0')} | {new_trades} new**\n"]
         # re-read last N trades
         all_trades = []
         if PAPER_DB.exists():
@@ -213,7 +230,7 @@ def main():
         print(f"\n  Paper calibration ({len(resolved)} resolved):")
         print(f"  Win rate: {wins}/{len(resolved)} = {win_rate:.0%} | P&L: ${total_pnl:+.2f}")
 
-        cal_lines = [f"**📊 Paper Calibration — {len(resolved)} resolved trades**\n"]
+        cal_lines = [f"**📊 Paper Calibration - {len(resolved)} resolved trades**\n"]
         cal_lines.append(f"Win rate: **{wins}/{len(resolved)} ({win_rate:.0%})** | Paper P&L: **{'+'if total_pnl>=0 else ''}${total_pnl:.2f}**\n")
 
         if tail_resolved:
