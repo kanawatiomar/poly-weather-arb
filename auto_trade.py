@@ -12,7 +12,6 @@ from datetime import date, timedelta
 BASE = Path(__file__).parent
 
 # ── Kelly sizing config ────────────────────────────────────────────────────
-BANKROLL      = 20.0  # $ — your trading bankroll (update as balance changes)
 KELLY_FRAC    = 0.5   # Half-Kelly (safer than full Kelly, less variance)
 MIN_BET       = 1.0   # $ minimum per trade
 MAX_BET       = 8.0   # $ maximum per trade (cap Kelly to avoid overbet)
@@ -26,7 +25,24 @@ MAX_CITY_EXPOSURE = 10.0   # $ max already deployed in any single city
 MAX_DATE_EXPOSURE = 8.0    # $ max in any single date
 MAX_PORTFOLIO_PCT = 0.35   # max % of bankroll in a single position
 
-def kelly_size(edge_pct, price, bankroll=BANKROLL, frac=KELLY_FRAC):
+def get_live_bankroll(private_key, creds):
+    """Fetch live USDC.e balance from Polymarket."""
+    try:
+        import httpx, py_clob_client.http_helpers.helpers as h
+        h._http_client = httpx.Client(http2=True, timeout=20, verify=False)
+        from py_clob_client.client import ClobClient
+        from py_clob_client.clob_types import ApiCreds, BalanceAllowanceParams, AssetType
+        api_creds = ApiCreds(api_key=creds["apiKey"], api_secret=creds["secret"], api_passphrase=creds["passphrase"])
+        client = ClobClient("https://clob.polymarket.com", key=private_key, chain_id=137, creds=api_creds, signature_type=0)
+        result = client.get_balance_allowance(params=BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=0))
+        balance = int(result.get("balance", 0)) / 1e6
+        print(f"  Live bankroll: ${balance:.2f} USDC")
+        return max(balance, 1.0)
+    except Exception as e:
+        print(f"  Bankroll fetch error: {e} — using $20 fallback")
+        return 20.0
+
+def kelly_size(edge_pct, price, bankroll=20.0, frac=KELLY_FRAC):
     """
     Half-Kelly bet sizing.
     Kelly fraction = edge / (1 - price) for binary YES bets
@@ -152,13 +168,16 @@ def main():
     print(f"  Scan date : {results.get('date')}")
     print(f"  Min date  : {MIN_DATE}  (skipping today's resolved markets)")
     print(f"  Eligible  : {len(opps)} opportunities with >{MIN_EDGE:.0%} edge")
-    print(f"  Bankroll  : ${BANKROLL:.2f}  |  Kelly: {KELLY_FRAC}x  |  Range: ${MIN_BET}-${MAX_BET}/trade")
+    print(f"  Bankroll  : ${bankroll:.2f} (live)  |  Kelly: {KELLY_FRAC}x  |  Range: ${MIN_BET}-${MAX_BET}/trade")
     print(f"  Trading   : top {MAX_TRADES}")
     print()
 
     if not opps:
         print("No eligible opportunities found. Re-run scanner.")
         sys.exit(0)
+
+    # Fetch live bankroll
+    bankroll = get_live_bankroll(private_key, creds)
 
     # Load existing exposure for concentration limits
     city_exposure, date_exposure = get_existing_exposure(creds, private_key)
@@ -231,8 +250,8 @@ def main():
             print(f"  -> SKIP: already ${date_exposure[date_key]:.2f} deployed on {date_key} (limit ${MAX_DATE_EXPOSURE})")
             continue
 
-        # ── Kelly sizing — bet proportional to edge, capped between MIN_BET and MAX_BET
-        trade_dollars = kelly_size(abs(edge), price)
+        # ── Kelly sizing — bet proportional to edge using live bankroll
+        trade_dollars = kelly_size(abs(edge), price, bankroll=bankroll)
         raw_size = trade_dollars / price
         size = max(1.0, round(raw_size, 1))
         cost = price * size
