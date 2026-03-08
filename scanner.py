@@ -396,6 +396,14 @@ def analyze_temperature_event(event, target_date):
             except (ValueError, IndexError):
                 token_id = None
 
+            # Include range bounds so auto_trade can detect tail bets
+            rng = parsed if parsed else {}
+            range_low  = rng.get("low")
+            range_high = rng.get("high")
+            # Clip infinities to None for JSON serialization
+            if range_low  == float("-inf"): range_low  = None
+            if range_high == float("inf"):  range_high = None
+
             opportunities.append({
                 "type": "temperature",
                 "event": title,
@@ -414,6 +422,8 @@ def analyze_temperature_event(event, target_date):
                 "city": city_key,
                 "date": target_date.isoformat(),
                 "days_ahead": days_ahead,
+                "range_low": range_low,
+                "range_high": range_high,
             })
 
     return opportunities

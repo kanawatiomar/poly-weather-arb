@@ -42,26 +42,37 @@ def get_live_bankroll(private_key, creds):
         print(f"  Bankroll fetch error: {e} — using $20 fallback")
         return 20.0
 
-def kelly_size(edge_pct, price, bankroll=20.0, frac=KELLY_FRAC):
+def kelly_size(edge_pct, price, bankroll=20.0, frac=KELLY_FRAC,
+               forecast_mean=None, range_low=None, range_high=None):
     """
-    Half-Kelly bet sizing.
-    Kelly fraction = edge / (1 - price) for binary YES bets
-    where edge = model_prob - market_price and price = market price paid.
+    Half-Kelly bet sizing with tail-bet penalty.
 
-    For a bet at price p with model prob q:
-      Kelly % = (q - p) / (1 - p)   [for YES side]
-    This gives fraction of bankroll to risk.
+    If the forecast mean is OUTSIDE the resolution range, the edge comes
+    purely from distribution tails — statistically weaker signal.
+    In that case we cut the bet by 50% (tail_penalty = 0.5).
+
+    Example: Buenos Aires <=23C YES, forecast mean 24.1C → outside range → half bet.
+    Example: Miami 84-85F NO, forecast mean 82F → inside range → full Kelly.
     """
     if price <= 0 or price >= 1:
         return MIN_BET
-    # Net edge as fraction of potential profit
+
+    # Base Kelly
     b = (1.0 - price) / price   # odds: profit per $1 risked
     p = price + edge_pct        # model probability
-    q = 1 - p                   # model probability of loss
+    q = 1 - p
     kelly_pct = (b * p - q) / b
     if kelly_pct <= 0:
         return MIN_BET
-    bet = bankroll * frac * kelly_pct
+
+    # Tail-bet penalty: mean forecast is outside the resolution range
+    tail_penalty = 1.0
+    if forecast_mean is not None and range_low is not None and range_high is not None:
+        if not (range_low <= forecast_mean <= range_high):
+            tail_penalty = 0.5
+            print(f"  [Kelly] Tail-bet: mean {forecast_mean:.1f} outside [{range_low},{range_high}] — bet x0.5")
+
+    bet = bankroll * frac * kelly_pct * tail_penalty
     return round(max(MIN_BET, min(MAX_BET, bet)), 2)
 
 
@@ -280,7 +291,12 @@ def main():
             continue
 
         # ── Kelly sizing — bet proportional to edge using live bankroll
-        trade_dollars = kelly_size(abs(edge), price, bankroll=bankroll)
+        # Pass forecast range so tail bets get penalized
+        f_mean = opp.get("forecast_mean")
+        f_low  = opp.get("range_low")
+        f_high = opp.get("range_high")
+        trade_dollars = kelly_size(abs(edge), price, bankroll=bankroll,
+                                   forecast_mean=f_mean, range_low=f_low, range_high=f_high)
         raw_size = trade_dollars / price
         size = max(1.0, round(raw_size, 1))
         cost = price * size
