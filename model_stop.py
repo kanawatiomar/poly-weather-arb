@@ -29,9 +29,11 @@ from scanner import (
     probability_in_range, CITIES
 )
 
-FLIP_THRESHOLD   = 0.10   # exit if model edge flipped by more than 10% against us
-MIN_SIZE_TO_EXIT = 1.0    # don't bother selling dust positions below this
-DISCORD_CHANNEL  = "1479364504943857684"
+FLIP_THRESHOLD      = 0.10   # exit if model edge flipped by more than 10% against us
+PROFIT_LOCK_EDGE    = 0.15   # lock profits when in-the-green AND edge compresses below 15%
+PROFIT_LOCK_MIN_UP  = 1.5    # only lock profits if position is up 50%+ from entry
+MIN_SIZE_TO_EXIT    = 1.0    # don't bother selling dust positions below this
+DISCORD_CHANNEL     = "1479364504943857684"
 
 def load_env():
     env = {}
@@ -230,6 +232,31 @@ def main():
             else:
                 print(f"  No bid found, cannot sell")
                 msg += "\n  ⚠️ No bid available to sell into"
+
+            post_discord(msg, discord_token)
+            exits.append(question[:50])
+
+        elif (0 < our_edge < PROFIT_LOCK_EDGE
+              and avg_price > 0
+              and cur_price >= avg_price * PROFIT_LOCK_MIN_UP):
+            # Market caught up to model — edge compressed while we're in profit → LOCK GAINS
+            bid = get_best_bid(token_id)
+            print(f"  $$ EDGE COMPRESSED ({our_edge:+.2%}), position up {cur_price/avg_price:.1f}x -- LOCKING PROFITS")
+            msg = (
+                f"💰 **PROFIT LOCK** | {question[:60]}\n"
+                f"Entry {avg_price:.3f} → Now {cur_price:.3f} ({cur_price/avg_price:.1f}x) | "
+                f"Model edge compressed to {our_edge:+.2%} — market caught up\n"
+                f"Forecast: {mean_temp:.1f}{unit_sym} | Unrealized: **+${unrealized:.2f}** | "
+                f"**SELLING {size:.1f} shares to lock gains**"
+            )
+
+            if bid:
+                resp = sell_position(client, token_id, size, bid)
+                print(f"  Sell resp: {resp}")
+                msg += f"\n  Sell @ {bid:.3f}"
+            else:
+                print(f"  No bid found, cannot sell")
+                msg += "\n  ⚠️ No bid — try manual sell"
 
             post_discord(msg, discord_token)
             exits.append(question[:50])
