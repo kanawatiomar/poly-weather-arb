@@ -96,13 +96,52 @@ def check_liquidity(token_id, price, min_depth=MIN_ASK_DEPTH):
 
 def get_existing_exposure(creds, private_key):
     """
-    Get current open orders grouped by city and date.
+    Get current exposure (filled positions + open orders) grouped by city and date.
+    Checks BOTH wallet positions (filled) and CLOB open orders (pending).
     Returns: {city: $amount}, {date: $amount}
     """
+    import httpx, re
+
     city_exposure = {}
     date_exposure = {}
+
+    def _add_exposure(question, cost):
+        for city in ["Buenos Aires","Wellington","Seattle","NYC","New York","Miami",
+                     "Chicago","Dallas","Atlanta","Toronto","London","Seoul","Paris"]:
+            if city.lower() in question.lower():
+                city_exposure[city] = city_exposure.get(city, 0) + cost
+                break
+        dm = re.search(r'(March|April|May) (\d+)', question)
+        if dm:
+            dt = f"{dm.group(1)} {dm.group(2)}"
+            date_exposure[dt] = date_exposure.get(dt, 0) + cost
+
+    # 1. Check FILLED positions from wallet (this is what was missing!)
     try:
-        import httpx, py_clob_client.http_helpers.helpers as h
+        env = load_env()
+        wallet = env.get("POLY_ADDRESS", "")
+        r = httpx.get(
+            "https://data-api.polymarket.com/positions",
+            params={"user": wallet, "sizeThreshold": "0.5"},
+            timeout=10
+        )
+        if r.is_success:
+            for pos in r.json():
+                size      = float(pos.get("size", 0))
+                avg_price = float(pos.get("avgPrice", 0) or 0)
+                cost      = size * avg_price
+                # fetch question from gamma API
+                token_id = pos.get("asset") or pos.get("tokenId", "")
+                end_date = pos.get("endDate", "")
+                title    = pos.get("title", "") or pos.get("question", "")
+                if title:
+                    _add_exposure(title, cost)
+    except Exception as e:
+        print(f"  Wallet exposure check error: {e}")
+
+    # 2. Check OPEN orders from CLOB (pending, not yet filled)
+    try:
+        import py_clob_client.http_helpers.helpers as h
         h._http_client = httpx.Client(http2=True, timeout=20, verify=False)
         from py_clob_client.client import ClobClient
         from py_clob_client.clob_types import ApiCreds, OpenOrderParams
@@ -111,23 +150,16 @@ def get_existing_exposure(creds, private_key):
         orders = client.get_orders(OpenOrderParams()) or []
         for o in orders:
             price = float(o.get("price", 0))
-            size  = float(o.get("original_size", 0))
-            cost  = price * size
+            size  = float(o.get("size_matched", 0))   # remaining unfilled size
+            orig  = float(o.get("original_size", 0))
+            remaining = orig - size
+            cost  = price * remaining
             q     = o.get("question", "") or ""
-            # Extract city from question
-            for city in ["Buenos Aires","Wellington","Seattle","NYC","New York","Miami",
-                          "Chicago","Dallas","Atlanta","Toronto","London","Seoul","Paris"]:
-                if city.lower() in q.lower():
-                    city_exposure[city] = city_exposure.get(city, 0) + cost
-                    break
-            # Extract date
-            import re
-            dm = re.search(r'(March|April|May) (\d+)', q)
-            if dm:
-                dt = f"{dm.group(1)} {dm.group(2)}"
-                date_exposure[dt] = date_exposure.get(dt, 0) + cost
+            if q:
+                _add_exposure(q, cost)
     except Exception as e:
-        print(f"  Exposure check error: {e}")
+        print(f"  Open order exposure check error: {e}")
+
     return city_exposure, date_exposure
 
 def main():
