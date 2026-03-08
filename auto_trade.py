@@ -13,7 +13,7 @@ BASE = Path(__file__).parent
 TRADE_DOLLARS = 3.0   # $ per trade
 MAX_TRADES    = 2     # max positions to open
 MIN_EDGE      = 0.20  # only trade if edge > 20%
-MIN_DATE      = (date.today() + timedelta(days=2)).isoformat()  # day-after-tomorrow+ (skip today AND tomorrow)
+MIN_DATE      = (date.today() + timedelta(days=1)).isoformat()  # tomorrow+ (skip only today's markets)
 
 
 def load_env():

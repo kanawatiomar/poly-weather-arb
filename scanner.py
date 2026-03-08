@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-Polymarket Weather Arbitrage Scanner v2
+Polymarket Weather Arbitrage Scanner v3
 - Handles: monthly precipitation + daily temperature markets
+- Multi-model ensemble: GFS + ECMWF + ICON + GEM + BOM
+- Uncertainty derived from model spread (not fixed estimates)
+- NWS cross-check for US cities
 - Outputs: edge table + saves scan_results.json
 """
 
@@ -13,11 +16,27 @@ from datetime import datetime, timedelta, date
 from scipy import stats
 import numpy as np
 
-BASE_GAMMA = "https://gamma-api.polymarket.com"
+BASE_GAMMA   = "https://gamma-api.polymarket.com"
 BASE_WEATHER = "https://api.open-meteo.com/v1/forecast"
 BASE_ARCHIVE = "https://archive-api.open-meteo.com/v1/archive"
-HEADERS = {"User-Agent": "Mozilla/5.0 WeatherArb/2.0"}
-POLY_FEE = 0.02
+BASE_NWS     = "https://api.weather.gov"
+HEADERS      = {"User-Agent": "Mozilla/5.0 WeatherArb/3.0"}
+POLY_FEE     = 0.02
+
+# Ensemble models — ordered by reliability. We drop any that fail/timeout.
+# GFS=US, ECMWF=European (best global), ICON=German, GEM=Canadian, BOM=Australian
+ENSEMBLE_MODELS = ["gfs", "ecmwf_ifs04", "icon_global", "gem_global", "bom_access_global"]
+
+# NWS grid points for US cities (office, gridX, gridY) — most accurate for US same/next day
+NWS_GRIDS = {
+    "nyc":     ("OKX", 33, 37),
+    "miami":   ("MFL", 110, 40),
+    "chicago": ("LOT", 74, 73),
+    "seattle": ("SEW", 124, 68),
+    "dallas":  ("FWD", 88, 87),
+    "atlanta": ("FFC", 52, 83),
+    "la":      ("LOX", 149, 47),
+}
 
 CITIES = {
     "nyc":         {"lat": 40.7128, "lon": -74.0060, "tz": "America/New_York", "unit": "fahrenheit"},
@@ -112,43 +131,105 @@ def parse_precip_market(question):
     return None
 
 
+def _fetch_nws_high(city_key, target_date):
+    """Fetch NWS forecast high for US cities. Returns float or None."""
+    grid = NWS_GRIDS.get(city_key)
+    if not grid:
+        return None
+    office, gx, gy = grid
+    try:
+        r = requests.get(
+            f"{BASE_NWS}/gridpoints/{office}/{gx},{gy}/forecast",
+            headers={**HEADERS, "Accept": "application/geo+json"},
+            timeout=8,
+        )
+        if not r.ok:
+            return None
+        periods = r.json().get("properties", {}).get("periods", [])
+        target_str = target_date.strftime("%Y-%m-%d")
+        highs = []
+        for p in periods:
+            start = p.get("startTime", "")[:10]
+            if start == target_str and p.get("isDaytime"):
+                temp = p.get("temperature")
+                unit = p.get("temperatureUnit", "F")
+                if temp is not None:
+                    # NWS always returns F; convert if city uses C
+                    city_unit = CITIES[city_key]["unit"]
+                    if city_unit == "celsius":
+                        temp = (temp - 32) * 5 / 9
+                    highs.append(float(temp))
+        return highs[0] if highs else None
+    except Exception:
+        return None
+
+
 def get_temperature_forecast(city_key, target_date):
     """
-    Get the forecasted high temperature for a city on target_date.
-    Returns: (mean_temp, std_dev)
+    Multi-model ensemble forecast for a city's daily high temperature.
+    Queries GFS, ECMWF, ICON, GEM, BOM in parallel via Open-Meteo.
+    For US cities also cross-checks NWS.
+    Returns: (ensemble_mean, ensemble_std)
+      - std is derived from model spread — tight agreement = high confidence
     """
     city = CITIES.get(city_key)
     if not city:
         return None, None
 
-    temp_unit = city["unit"]
-    r = requests.get(BASE_WEATHER, params={
-        "latitude": city["lat"],
-        "longitude": city["lon"],
-        "daily": "temperature_2m_max",
-        "start_date": target_date.isoformat(),
-        "end_date": target_date.isoformat(),
-        "timezone": city["tz"],
-        "temperature_unit": temp_unit,
-    }, headers=HEADERS, timeout=10)
+    temp_unit  = city["unit"]
+    days_ahead = (target_date - date.today()).days
 
-    if r.ok:
-        data = r.json()
-        temps = data["daily"].get("temperature_2m_max", [None])
-        t = temps[0] if temps else None
-        if t is not None:
-            # Std dev based on forecast horizon
-            days_ahead = (target_date - date.today()).days
-            if days_ahead <= 1:
-                std = 1.5   # same/next day: very accurate
-            elif days_ahead <= 3:
-                std = 2.5
-            elif days_ahead <= 7:
-                std = 3.5
-            else:
-                std = 5.0
-            return float(t), std
-    return None, None
+    # --- Fetch all ensemble models ---
+    model_temps = []
+    for model in ENSEMBLE_MODELS:
+        try:
+            r = requests.get(BASE_WEATHER, params={
+                "latitude":         city["lat"],
+                "longitude":        city["lon"],
+                "daily":            "temperature_2m_max",
+                "start_date":       target_date.isoformat(),
+                "end_date":         target_date.isoformat(),
+                "timezone":         city["tz"],
+                "temperature_unit": temp_unit,
+                "models":           model,
+            }, headers=HEADERS, timeout=8)
+            if r.ok:
+                temps = r.json().get("daily", {}).get("temperature_2m_max", [None])
+                t = temps[0] if temps else None
+                if t is not None:
+                    model_temps.append(float(t))
+        except Exception:
+            pass
+
+    if not model_temps:
+        return None, None
+
+    # --- NWS cross-check for US cities ---
+    nws_temp = _fetch_nws_high(city_key, target_date)
+    if nws_temp is not None:
+        model_temps.append(nws_temp)
+
+    ensemble_mean = float(np.mean(model_temps))
+
+    # Std dev from model spread — minimum floor based on days ahead
+    if len(model_temps) >= 2:
+        spread_std = float(np.std(model_temps, ddof=1))
+    else:
+        spread_std = 0.0
+
+    # Floor: even if all models agree, there's irreducible forecast error
+    if days_ahead <= 1:
+        floor_std = 1.0
+    elif days_ahead <= 3:
+        floor_std = 1.8
+    elif days_ahead <= 7:
+        floor_std = 3.0
+    else:
+        floor_std = 4.5
+
+    ensemble_std = max(spread_std, floor_std)
+
+    return ensemble_mean, ensemble_std
 
 
 def get_precipitation_model(city_key, month_start, month_end):
@@ -262,9 +343,10 @@ def analyze_temperature_event(event, target_date):
     unit = CITIES[city_key]["unit"]
     unit_sym = "F" if unit == "fahrenheit" else "C"
 
+    nws_note = " +NWS" if city_key in NWS_GRIDS else ""
     print(f"\n{'='*60}")
     print(f"TEMP: {title}")
-    print(f"City: {city_key} | Date: {target_date} | Forecast: {mean_temp:.1f}+/-{std_temp:.1f}{unit_sym} ({days_ahead}d ahead)")
+    print(f"City: {city_key} | Date: {target_date} | Ensemble({len(ENSEMBLE_MODELS)} models{nws_note}): {mean_temp:.1f}+/-{std_temp:.1f}{unit_sym} ({days_ahead}d ahead)")
 
     opportunities = []
     print(f"\n  {'Market':<52} {'Poly':>6} {'Model':>6} {'Edge':>7}  Signal")
@@ -328,6 +410,7 @@ def analyze_temperature_event(event, target_date):
                 "volume": float(market.get("volume") or 0),
                 "forecast_mean": mean_temp,
                 "forecast_std": std_temp,
+                "models_used": len(ENSEMBLE_MODELS) + (1 if city_key in NWS_GRIDS else 0),
                 "city": city_key,
                 "date": target_date.isoformat(),
                 "days_ahead": days_ahead,
