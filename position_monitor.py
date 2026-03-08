@@ -1,3 +1,4 @@
+from discord_alert import post_discord
 """
 position_monitor.py -- Discord alerts on big position moves.
 Tracks last known price per token, fires alert when:
@@ -175,3 +176,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

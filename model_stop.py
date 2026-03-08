@@ -1,3 +1,4 @@
+from discord_alert import post_discord
 """
 model_stop.py -- Model-based exit system for Polymarket weather positions.
 
@@ -286,3 +287,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

@@ -1,3 +1,4 @@
+from discord_alert import post_discord
 """
 resolution_tracker.py — Model calibration tracker for Polymarket weather arb.
 
@@ -226,3 +227,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
