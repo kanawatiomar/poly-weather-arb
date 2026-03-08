@@ -6,7 +6,7 @@ Sizing: Half-Kelly criterion — bet proportional to edge, capped at MAX_BET.
 
 import os, json, sys
 from pathlib import Path
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 
 
 BASE = Path(__file__).parent
@@ -313,18 +313,35 @@ def main():
             if order_id:
                 print(f"  -> OrderID: {order_id}")
 
-            log.append({
-                "question" : question,
-                "signal"   : signal,
-                "date"     : mdate,
-                "price"    : price,
-                "size"     : size,
-                "cost"     : cost,
-                "token_id" : token_id,
-                "status"   : status,
-                "order_id" : order_id,
-                "error"    : error_msg,
-            })
+            trade_record = {
+                "placed_at"    : datetime.utcnow().isoformat(),
+                "question"     : question,
+                "city"         : opp.get("city", ""),
+                "market_date"  : mdate,
+                "signal"       : signal,
+                "token_id"     : token_id,
+                "entry_price"  : price,
+                "model_prob"   : opp.get("model_prob"),
+                "forecast_mean": opp.get("forecast_mean"),
+                "forecast_std" : opp.get("forecast_std"),
+                "models_used"  : opp.get("models_used"),
+                "edge_pct"     : edge,
+                "size"         : size,
+                "cost"         : cost,
+                "order_id"     : order_id,
+                "status"       : status,
+                "error"        : error_msg,
+                "resolved"     : False,
+                "outcome"      : None,
+                "final_price"  : None,
+                "pnl"          : None,
+            }
+            log.append(trade_record)
+
+            # Append to persistent trades DB for resolution tracking
+            trades_db = BASE / "trades_db.jsonl"
+            with open(trades_db, "a") as f:
+                f.write(json.dumps(trade_record) + "\n")
 
         except Exception as e:
             print(f"  -> ERROR: {e}")
