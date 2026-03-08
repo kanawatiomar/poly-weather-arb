@@ -1,0 +1,12 @@
+.env
+creds.json
+scan_results.json
+trade_log.json
+trades_placed.json
+ufc_bets.json
+auto_run.log
+last_scan.txt
+last_trade.txt
+discovered_slugs.json
+__pycache__/
+*.pyc
