@@ -168,22 +168,12 @@ def main():
     print(f"  Scan date : {results.get('date')}")
     print(f"  Min date  : {MIN_DATE}  (skipping today's resolved markets)")
     print(f"  Eligible  : {len(opps)} opportunities with >{MIN_EDGE:.0%} edge")
-    print(f"  Bankroll  : ${bankroll:.2f} (live)  |  Kelly: {KELLY_FRAC}x  |  Range: ${MIN_BET}-${MAX_BET}/trade")
     print(f"  Trading   : top {MAX_TRADES}")
     print()
 
     if not opps:
         print("No eligible opportunities found. Re-run scanner.")
         sys.exit(0)
-
-    # Fetch live bankroll
-    bankroll = get_live_bankroll(private_key, creds)
-
-    # Load existing exposure for concentration limits
-    city_exposure, date_exposure = get_existing_exposure(creds, private_key)
-    if city_exposure or date_exposure:
-        print(f"  City exposure  : {dict((k, f'${v:.2f}') for k,v in city_exposure.items())}")
-        print(f"  Date exposure  : {dict((k, f'${v:.2f}') for k,v in date_exposure.items())}")
 
     top = opps[:MAX_TRADES]
 
@@ -211,6 +201,13 @@ def main():
         creds=api_creds,
         signature_type=0,
     )
+
+    # Fetch live bankroll + existing exposure
+    bankroll = get_live_bankroll(private_key, creds)
+    city_exposure, date_exposure = get_existing_exposure(creds, private_key)
+    if city_exposure or date_exposure:
+        print(f"  City exposure  : {dict((k, f'${v:.2f}') for k,v in city_exposure.items())}")
+        print(f"  Date exposure  : {dict((k, f'${v:.2f}') for k,v in date_exposure.items())}")
 
     log = []
 
