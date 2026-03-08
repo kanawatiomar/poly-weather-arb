@@ -20,6 +20,22 @@ from datetime import datetime, date
 BASE = Path(__file__).parent
 PAPER_DB = BASE / "paper_trades.jsonl"
 
+def load_env():
+    env = {}
+    for line in (BASE / ".env").read_text().splitlines():
+        if "=" in line and not line.startswith("#"):
+            k, v = line.split("=", 1)
+            env[k.strip()] = v.strip()
+    return env
+
+def post_paper_discord(msg):
+    env = load_env()
+    url = env.get("PAPER_DISCORD_WEBHOOK","")
+    if not url: return
+    try:
+        httpx.post(url, json={"content": msg[:1990]}, timeout=8)
+    except: pass
+
 MIN_EDGE      = 0.10   # lower than real (0.20) to get more data
 MAX_TRADES    = 20     # paper trade more markets per scan
 PAPER_BANKROLL = 1000  # hypothetical bankroll for sizing
@@ -161,6 +177,21 @@ def main():
 
     print(f"[PaperTrader] {new_trades} new paper trades logged")
 
+    # Post new trades to #paper-trading
+    if new_trades > 0:
+        lines = [f"**📝 Paper Trades Logged — {datetime.now().strftime('%I:%M %p').lstrip('0')} | {new_trades} new**\n"]
+        # re-read last N trades
+        all_trades = []
+        if PAPER_DB.exists():
+            for line in PAPER_DB.read_text().splitlines()[-new_trades:]:
+                if line.strip():
+                    try: all_trades.append(json.loads(line))
+                    except: pass
+        for t in all_trades:
+            tail = " ⚡tail" if t.get("tail_bet") else ""
+            lines.append(f"  [{t['signal']}] {t['question'][:50]} | edge {t['edge_pct']:+.0%}{tail}")
+        post_paper_discord("\n".join(lines))
+
     # Quick calibration on resolved paper trades
     resolved = []
     if PAPER_DB.exists():
@@ -177,14 +208,25 @@ def main():
         total_pnl = sum(t.get("pnl", 0) or 0 for t in resolved)
         tail_resolved = [t for t in resolved if t.get("tail_bet")]
         non_tail      = [t for t in resolved if not t.get("tail_bet")]
+        win_rate = wins/len(resolved)
+
         print(f"\n  Paper calibration ({len(resolved)} resolved):")
-        print(f"  Win rate: {wins}/{len(resolved)} = {wins/len(resolved):.0%} | P&L: ${total_pnl:+.2f}")
+        print(f"  Win rate: {wins}/{len(resolved)} = {win_rate:.0%} | P&L: ${total_pnl:+.2f}")
+
+        cal_lines = [f"**📊 Paper Calibration — {len(resolved)} resolved trades**\n"]
+        cal_lines.append(f"Win rate: **{wins}/{len(resolved)} ({win_rate:.0%})** | Paper P&L: **{'+'if total_pnl>=0 else ''}${total_pnl:.2f}**\n")
+
         if tail_resolved:
             tw = sum(1 for t in tail_resolved if t.get("outcome")=="WIN")
             print(f"  Tail bets: {tw}/{len(tail_resolved)} wins ({tw/len(tail_resolved):.0%})")
+            cal_lines.append(f"⚡ Tail bets (mean outside range): {tw}/{len(tail_resolved)} wins ({tw/len(tail_resolved):.0%})")
         if non_tail:
             nw = sum(1 for t in non_tail if t.get("outcome")=="WIN")
             print(f"  In-range bets: {nw}/{len(non_tail)} wins ({nw/len(non_tail):.0%})")
+            cal_lines.append(f"✅ In-range bets (mean inside range): {nw}/{len(non_tail)} wins ({nw/len(non_tail):.0%})")
+
+        if len(resolved) >= 5:
+            post_paper_discord("\n".join(cal_lines))
 
 if __name__ == "__main__":
     main()
